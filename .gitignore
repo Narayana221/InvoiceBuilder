@@ -1,0 +1,27 @@
+# ---- .NET ----
+backend/**/bin/
+backend/**/obj/
+*.user
+*.userosscache
+*.suo
+.vs/
+
+# ---- Angular / Node ----
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+npm-debug.log*
+
+# ---- Env / secrets ----
+.env
+*.pfx
+*.pem
+appsettings.*.local.json
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- IDE ----
+.idea/
+*.swp

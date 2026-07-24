@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\InvoiceBuilder.Shared\InvoiceBuilder.Shared.csproj" />
+    <ProjectReference Include="..\InvoiceBuilder.Invoices\InvoiceBuilder.Invoices.csproj" />
+    <ProjectReference Include="..\InvoiceBuilder.Users\InvoiceBuilder.Users.csproj" />
+    <ProjectReference Include="..\InvoiceBuilder.Payments\InvoiceBuilder.Payments.csproj" />
+    <ProjectReference Include="..\InvoiceBuilder.Reports\InvoiceBuilder.Reports.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>
