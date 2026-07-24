@@ -6,7 +6,7 @@ using InvoiceBuilder.Users;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
-    .AddInvoicesModule()
+    .AddInvoicesModule(builder.Configuration)
     .AddUsersModule()
     .AddPaymentsModule()
     .AddReportsModule();

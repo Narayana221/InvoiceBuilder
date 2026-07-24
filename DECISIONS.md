@@ -51,3 +51,51 @@ Format per entry:
 **Alternatives considered:** Deferring signature support entirely until a later pass — rejected so the signing pipeline is exercised (and testable) from the PDF generation phase onward, rather than bolted on afterward.
 
 **Consequences:** Signed PDFs in dev will show as "self-signed / not trusted" until a production cert is swapped in; the signing code path itself doesn't change between environments, only the cert source (config-driven).
+
+---
+
+## [Phase 2] Soft delete for Customer, Sender, Invoice
+
+**Context:** The spec's Delete actions ("with confirmation") don't say whether records are actually removed. Customers/Senders can be referenced by existing invoices.
+
+**Decision:** Add `IsDeleted` + `DeletedAtUtc` to Customer, Sender, and Invoice (via a shared `ISoftDeletable` interface in `InvoiceBuilder.Shared`), with an EF Core global query filter (`!IsDeleted`) excluding them by default. Invoice's FK to Customer/Sender uses `DeleteBehavior.Restrict` as a second line of defense against ever hard-deleting a party with invoice history.
+
+**Alternatives considered:** Hard delete, which is simpler but risks orphaning or losing history for past invoices when a Customer/Sender used on them is deleted.
+
+**Consequences:** "Deleted" rows still occupy storage and must be excluded consistently — `InvoiceLineItem` needed a matching filter (`!Invoice.IsDeleted`) once EF Core flagged the mismatch during migration generation, since it doesn't implement `ISoftDeletable` itself but is reachable independently of its parent Invoice.
+
+---
+
+## [Phase 2] Auto-generated invoice numbers (design decided now, generator built in Phase 3)
+
+**Context:** The mockup shows an editable-looking "INV-2025-005" field, but per-user free text risks duplicates/inconsistent formats.
+
+**Decision:** `InvoiceNumber` is a required, unique `varchar(50)` column now. The actual sequential-generation algorithm (e.g. per-year counter) is deferred to Phase 3 (Invoice Module API), since it's a creation-time behavior, not a schema concern.
+
+**Alternatives considered:** User-entered free text with only a uniqueness constraint — rejected per earlier discussion in favor of guaranteed uniqueness and consistent formatting.
+
+**Consequences:** The unique index applies globally, including soft-deleted rows — an invoice number is never reused, even after "deletion," which is the correct behavior for an audit trail.
+
+---
+
+## [Phase 2] Persisted totals on Invoice, computed-only totals on line items
+
+**Context:** Invoice needs Subtotal/Tax/Total for the paginated list view; individual line items need a line total for the detail/edit view.
+
+**Decision:** `InvoiceLineItem.LineTotal` is an unmapped computed property (`Quantity * UnitPrice`) — never persisted, never out of sync. `Invoice.SubtotalAmount/TaxAmount/TotalAmount` ARE persisted columns, recalculated via a `RecalculateTotals()` domain method whenever line items change.
+
+**Alternatives considered:** Computing Invoice totals on the fly too (fully normalized) — rejected because the Invoices list screen would need to load and sum every invoice's line items on every page load just to render a totals column.
+
+**Consequences:** Any code path that adds/removes/edits line items (Phase 3's API) must remember to call `RecalculateTotals()` before saving, or the persisted totals go stale. All monetary columns use `numeric(18,2)` via `HasPrecision`, never `float`/`double`, to avoid floating-point rounding errors in currency math.
+
+---
+
+## [Phase 2] Local Postgres port conflict — containerized Postgres moved to host port 5433
+
+**Context:** This dev machine already has a native Postgres install listening on `127.0.0.1:5432`. Docker's port-forward for the `postgres` service also targeted `5432`, and on macOS the native install's loopback binding intercepted connections meant for the container — `dotnet ef` calls against `localhost:5432` failed with "role does not exist" even though the container was healthy.
+
+**Decision:** Remap `docker-compose.yml`'s `postgres` service to `5433:5432` on the host side (container-internal port and inter-container networking via `Host=postgres` are unaffected). `appsettings.Development.json`'s connection string was updated to `Port=5433` for host-side tools (`dotnet run`, `dotnet ef`).
+
+**Alternatives considered:** Stopping the user's native Postgres service — rejected as out of scope; it may be in use by other projects.
+
+**Consequences:** Anyone running backend tooling directly on the host (not via Docker) must use port 5433, not the Postgres default 5432. This is specific to this machine's setup and worth re-checking if it causes confusion later (e.g. documented in a README).
