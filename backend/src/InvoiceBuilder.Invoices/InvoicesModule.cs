@@ -1,5 +1,10 @@
+using FluentValidation;
+using InvoiceBuilder.Invoices.Contracts;
 using InvoiceBuilder.Invoices.Data;
-using Microsoft.AspNetCore.Builder;
+using InvoiceBuilder.Invoices.Endpoints;
+using InvoiceBuilder.Invoices.Pdf;
+using InvoiceBuilder.Invoices.Services;
+using IronPdf;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -14,11 +19,30 @@ public static class InvoicesModule
         services.AddDbContext<InvoicesDbContext>(options =>
             options.UseNpgsql(configuration.GetConnectionString("Default")));
 
+        services.AddScoped<IInvoiceNumberGenerator, InvoiceNumberGenerator>();
+
+        services.AddScoped<IValidator<CustomerRequest>, CustomerRequestValidator>();
+        services.AddScoped<IValidator<SenderRequest>, SenderRequestValidator>();
+        services.AddScoped<IValidator<InvoiceRequest>, InvoiceRequestValidator>();
+
+        services.Configure<IronPdfOptions>(configuration.GetSection("IronPdf"));
+        services.AddScoped<IInvoicePdfRenderer, InvoicePdfRenderer>();
+
+        var licenseKey = configuration["IronPdf:LicenseKey"];
+        if (!string.IsNullOrWhiteSpace(licenseKey))
+        {
+            License.LicenseKey = licenseKey;
+        }
+
         return services;
     }
 
     public static IEndpointRouteBuilder MapInvoicesModule(this IEndpointRouteBuilder app)
     {
+        app.MapCustomerEndpoints();
+        app.MapSenderEndpoints();
+        app.MapInvoiceEndpoints();
+
         return app;
     }
 }

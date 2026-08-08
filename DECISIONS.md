@@ -99,3 +99,135 @@ Format per entry:
 **Alternatives considered:** Stopping the user's native Postgres service — rejected as out of scope; it may be in use by other projects.
 
 **Consequences:** Anyone running backend tooling directly on the host (not via Docker) must use port 5433, not the Postgres default 5432. This is specific to this machine's setup and worth re-checking if it causes confusion later (e.g. documented in a README).
+
+---
+
+## [Phase 3] No repository/service layer between endpoints and DbContext
+
+**Context:** Minimal API handlers need to run business logic (CRUD, invoice-number generation, totals recalculation) against the database.
+
+**Decision:** Endpoint handlers call `InvoicesDbContext` directly. No `IXRepository`/`IXService` interfaces wrap it.
+
+**Alternatives considered:** A repository-per-entity layer — rejected because `DbContext` already implements the repository and unit-of-work patterns; wrapping it in another interface at this project's size adds indirection with no real abstraction behind it (there's only ever one implementation, Postgres via EF Core).
+
+**Consequences:** If a second data-access technology or heavier domain logic shows up later, that's the signal to introduce a service layer — not before. Business rules that do exist (totals recalculation, invoice numbering) live as methods on the domain entities / a small dedicated service (`InvoiceNumberGenerator`), not scattered across endpoint lambdas.
+
+---
+
+## [Phase 3] FluentValidation wired in via a custom `IEndpointFilter`, not built-in auto-validation
+
+**Context:** FluentValidation removed its ASP.NET Core MVC auto-validation integration in v11; Minimal APIs never had one to begin with.
+
+**Decision:** A generic `ValidationFilter<TRequest>` (`IEndpointFilter`) resolves `IValidator<TRequest>` from DI and runs before the handler, added per-endpoint via `.AddEndpointFilter<ValidationFilter<TRequest>>()`.
+
+**Alternatives considered:** Manual `if (!result.IsValid) return ...` checks inside every handler — rejected as repetitive and easy to forget on a new endpoint.
+
+**Consequences:** Any new POST/PUT endpoint that wants validation must remember to both register `IValidator<TRequest>` in DI (`InvoicesModule.cs`) and attach the filter — neither happens automatically.
+
+---
+
+## [Phase 3] Manual DTO mapping, no AutoMapper/Mapster
+
+**Context:** Entities (EF-tracked, with navigation properties) shouldn't be serialized directly over HTTP — risk of over-posting, circular navigation references, and leaking fields like `IsDeleted`.
+
+**Decision:** Plain C# `record` DTOs (`CustomerDto`, `InvoiceRequest`, etc.) with hand-written `ToDto()`/`ApplyRequest()` extension methods per entity.
+
+**Alternatives considered:** AutoMapper or Mapster for convention-based mapping — rejected as an added dependency and a layer of reflection-based indirection that isn't earning its keep at four entities; explicit mapping methods are easier to debug and just as fast to write here.
+
+**Consequences:** `InvoiceMapping.ToDto()`/`ToSummaryDto()` require `Customer`/`Sender`/`LineItems` navigations to already be loaded (via `.Include(...)`) — calling them on a lazily-unloaded entity throws. This is a real footgun, flagged with a comment at the top of `InvoiceMapping.cs`.
+
+---
+
+## [Phase 3] Invoice-number race condition accepted, not solved
+
+**Context:** `InvoiceNumberGenerator` computes "next number" by querying the current max and adding 1 — classic TOCTOU (time-of-check-to-time-of-use) race under concurrent requests.
+
+**Decision:** Accept the race for now. The unique index on `InvoiceNumber` (from Phase 2) means a genuine collision fails loud with a DB constraint violation on the second concurrent insert, rather than silently duplicating a number.
+
+**Alternatives considered:** A Postgres advisory lock or serializable transaction around the read-then-insert — rejected as unnecessary complexity for a single-user side project with no realistic concurrent-invoice-creation scenario.
+
+**Consequences:** Under real concurrent load this would need revisiting (e.g. a `SELECT ... FOR UPDATE` on a per-year counter row, or a native Postgres sequence). Worth reconsidering if a Payments/multi-user module ever makes concurrent invoice creation plausible.
+
+---
+
+## [Phase 3] Docker Desktop daemon corruption from a transient disk-full condition
+
+**Context:** While rebuilding the `api` image, the host disk briefly reported ~119MB free (from ~10GB normally), and Docker's build failed with `input/output error` writing to its containerd metadata store. The disk space itself recovered shortly after, but Docker's daemon was left in a state where even `docker ps` hangs and previously-running containers (Postgres, api, web) became unreachable.
+
+**Decision:** Did not attempt automated recovery (`docker system prune`, killing/restarting the Docker Desktop process) — flagged it to the user instead, since restarting Docker Desktop stops every container on the machine, not just this project's, and is the user's call.
+
+**Alternatives considered:** Scripting a forced Docker Desktop restart — rejected as an unrequested, disruptive action on shared machine state.
+
+**Consequences:** Phase 3's Docker container smoke test is deferred until Docker Desktop is restarted. The code itself was already verified independently of Docker: `dotnet test` (unit + integration, the latter over real HTTP against a real Postgres instance) passed before Docker hung.
+
+---
+
+## [Phase 4] IronPDF for HTML-to-PDF — blocked at runtime without at least a trial key
+
+**Context:** IronPDF is a commercial library (perpetual licenses from ~$749+/year); CLAUDE.md's tech stack names it explicitly. Buying a license isn't a decision the assistant can make on the user's behalf. Initial research (IronPDF's own marketing pages) suggested unlicensed/trial use produces a watermarked-but-functional PDF — **this turned out to be wrong.** Actually running `InvoicePdfRenderer` (package version 2026.8.1) throws `IronSoftware.Exceptions.LicensingException: Production License Required` immediately, regardless of `ASPNETCORE_ENVIRONMENT`. The "free for 7 days" grace period referenced in the error message requires first registering for a trial key at ironpdf.com (email signup, no payment) — there is no zero-config unlicensed path at all with this version.
+
+**Decision:** Build and commit the full rendering/signing/PDF-UA pipeline anyway — the code is correct and was verified by direct compilation and by the `LicensingException` itself (which only fires *after* `RenderHtmlAsPdfUA` successfully rendered the HTML — the failure is in `PdfDocument.BinaryData`, i.e. the licensing gate, not the rendering). `IronPdf:LicenseKey` is wired through config; the corresponding test (`InvoicePdfRendererTests.Render_ProducesASignedPdf`) is marked `[Fact(Skip = ...)]` rather than left failing, since a red test here would misleadingly suggest a code defect rather than a licensing gate. The user was asked and chose to defer getting a trial key rather than register for one now.
+
+**Alternatives considered:** Registering for a trial key immediately to unblock verification — offered to the user, declined for now. Swapping to a different PDF library — rejected, CLAUDE.md specifies IronPDF explicitly as a deliberate, informed tech choice (not something to second-guess unilaterally).
+
+**Consequences:** `GET /api/invoices/{id}/pdf` will return a 500 (unhandled `LicensingException`) until `IronPdf:LicenseKey` is set to a real trial or paid key. This is not a bug to "fix" later — it's an external dependency the project cannot function around. Whoever picks this back up should register a trial key at https://ironpdf.com/start-free/trial/, set it in `appsettings.Development.json`, remove the `Skip` from `InvoicePdfRendererTests`, and confirm the test passes before considering Phase 4 verified.
+
+---
+
+## [Phase 4] PDF/UA tagging via `RenderHtmlAsPdfUA`, not a full compliance audit
+
+**Context:** The spec requires PDF/UA compliance for long-term storage/accessibility. Full compliance validation (screen-reader testing, structure-tree auditing) is a specialized, ongoing discipline, not a one-time render-time flag.
+
+**Decision:** Use IronPDF's `ChromePdfRenderer.RenderHtmlAsPdfUA()` (instead of `RenderHtmlAsPdf()`) and set `pdf.MetaData.Title` — this produces genuinely tagged PDF/UA-1 output (structure tree, reading order, declared title) essentially for free, as long as the source HTML uses semantic markup (`<h1>`/`<h2>`, `<table><thead><th scope="col">`, no divs-pretending-to-be-tables). The invoice template was written with exactly that in mind.
+
+**Alternatives considered:** Skipping PDF/UA entirely and revisiting later — rejected once research showed the "good enough for now" version costs one method-name swap, not a redesign.
+
+**Consequences:** This is best-effort structural tagging, not a certified compliance audit. If a real accessibility/audit requirement ever demands formal PDF/UA-1 or PDF/UA-2 validation, that's a dedicated task, not something this phase claims to have finished.
+
+---
+
+## [Phase 4] Plain string-interpolation HTML template, no Razor/Scriban
+
+**Context:** The invoice PDF needs one HTML document assembled from an `Invoice` domain object, including a variable-length line-items table.
+
+**Decision:** `InvoiceHtmlTemplate.Build(Invoice)` is a static method using C# raw string literals (`$$"""..."""`) with a separate loop building the repeating `<tr>` fragment. No templating library.
+
+**Alternatives considered:** RazorLight/Scriban for proper markup/logic separation — rejected as unjustified weight at exactly one document type. Every user-controlled field (`Customer.Name`, `Sender.BankDetails`, `Notes`, line item `Description`) is passed through `WebUtility.HtmlEncode` before interpolation — unescaped user input rendered by a real browser engine (Chromium, via IronPDF) is a genuine HTML-injection risk, not a theoretical one, so this is tested explicitly (`InvoiceHtmlTemplateTests.Build_HtmlEncodesUserSuppliedFields`).
+
+**Consequences:** If a second document type (e.g. a payment receipt) is added later, revisit this — copy-pasting a second raw-string template is the signal that a real templating layer has started earning its keep.
+
+---
+
+## [Phase 4] Self-signed dev certificate lives in the Api project, gitignored, copied to publish output
+
+**Context:** Digital signatures require a certificate; Phase 0 already decided on a self-signed dev cert with a real cert swapped in for production.
+
+**Decision:** `backend/src/InvoiceBuilder.Api/certs/invoice-signing.pfx` (`.pfx` already covered by the repo's `*.pfx` gitignore rule), referenced via `<None Include="certs\*.pfx" CopyToOutputDirectory="PreserveNewest" />` in `InvoiceBuilder.Api.csproj` so `dotnet publish` carries it into the Docker image automatically. Path/password configured via `IronPdf:SigningCertificatePath`/`SigningCertificatePassword` in `appsettings.Development.json`, resolved at runtime relative to `AppContext.BaseDirectory`.
+
+**Alternatives considered:** A separate `certs/` folder outside any project (was the original plan) — rejected once it became clear `dotnet publish` only copies a project's own output, not sibling folders; putting the cert inside the deployable project is what makes it actually reach the Docker image.
+
+**Consequences:** In production, this dev `.pfx` and its throwaway password (committed in plaintext in `appsettings.Development.json`, consistent with this repo's existing pattern for the dev Postgres password) must be replaced with a real certificate provisioned via a proper secret store — not baked into the image.
+
+---
+
+## [Phase 4] Chromium runtime dependencies added to the Api Docker image
+
+**Context:** IronPDF renders via a headless Chromium engine. The `mcr.microsoft.com/dotnet/aspnet:10.0` base image is minimal Debian and lacks the shared libraries Chromium needs — this would work locally (macOS has them) and fail silently-until-runtime inside the container specifically.
+
+**Decision:** Added an `apt-get install` layer to the Dockerfile's final stage installing `libnss3`, `libgbm1`, `libgdiplus`, and related packages, per IronPDF's documented Debian/Ubuntu dependency list.
+
+**Alternatives considered:** Discovering this via a failed container at PDF-generation time — rejected in favor of fixing it proactively, since it's a well-documented, known requirement rather than a surprise.
+
+**Consequences:** The Api image is larger and slower to build. This fix was verified as *correct* — the base image resolved to Ubuntu Noble (24.04) on this arm64 host rather than Debian, requiring `libasound2t64` instead of `libasound2` (fixed after the first build failure named the exact missing package). The apt layer itself is no longer the blocker; see the next entry for what is.
+
+---
+
+## [Phase 4] IronPDF has no Linux ARM64 native Chrome build — Docker PDF generation blocked on this machine
+
+**Context:** After fixing the apt dependency and the `libasound2t64` naming, `GET /api/invoices/{id}/pdf` still failed inside the container, but with a different error: `IronSoftwareDeploymentException` — unable to locate or download `IronInterop` for `linux-arm64`. Adding an explicit `IronPdf.Native.Chrome.Linux` package reference didn't fix it either. Inspecting that package's contents directly (`~/.nuget/packages/ironpdf.native.chrome.linux/2026.8.1/runtimes/`) showed it ships **`linux-x64` only** — no `linux-arm64` build exists at all. This Mac is Apple Silicon, so Docker Desktop builds/runs native arm64 containers by default, and IronPDF's Linux Chrome engine simply doesn't support that architecture.
+
+**Decision:** Stop pursuing a native-arm64 fix — there isn't one available from the vendor. Documented the two real options for later: (a) force the `api` service to build/run as `linux/amd64` via Docker Desktop's x64 emulation (`platform: linux/amd64` in `docker-compose.yml`), which works but requires pulling a separate set of x64 base images and Chrome binaries, or (b) accept arm64-only local `dotnet run` verification (which works fine — macOS arm64 IS supported by IronPDF) and defer containerized PDF verification to a real x64 deployment target (which is what production would use anyway). Did not attempt (a) given disk had just dropped to 1.7GB free from the preceding build attempts — user chose to leave Docker PDF verification unresolved for now rather than risk a third Docker storage corruption (see the two entries above and in Phase 3) chasing it under low disk headroom.
+
+**Alternatives considered:** Switching to a different PDF library with better arm64 Docker support — rejected, same reasoning as the licensing decision above: IronPDF is CLAUDE.md's specified tech choice, not something to second-guess unilaterally over a workaround-able deployment-environment gap.
+
+**Consequences:** On this specific dev machine, `dotnet run` (native macOS arm64) can render PDFs once a license key is added; the Dockerized `api` container cannot, until either `platform: linux/amd64` is configured (with adequate disk headroom to do it safely) or the container is actually deployed to an x64 host. Anyone resuming this: free real disk space first, then add `platform: linux/amd64` under the `api` service in `docker-compose.yml` before rebuilding.
