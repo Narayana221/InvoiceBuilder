@@ -231,3 +231,51 @@ Format per entry:
 **Alternatives considered:** Switching to a different PDF library with better arm64 Docker support — rejected, same reasoning as the licensing decision above: IronPDF is CLAUDE.md's specified tech choice, not something to second-guess unilaterally over a workaround-able deployment-environment gap.
 
 **Consequences:** On this specific dev machine, `dotnet run` (native macOS arm64) can render PDFs once a license key is added; the Dockerized `api` container cannot, until either `platform: linux/amd64` is configured (with adequate disk headroom to do it safely) or the container is actually deployed to an x64 host. Anyone resuming this: free real disk space first, then add `platform: linux/amd64` under the `api` service in `docker-compose.yml` before rebuilding.
+
+---
+
+## [Phase 5] CORS instead of an Angular dev-server proxy
+
+**Context:** The Angular app (port 4200) and the API (port 5080) are different origins. Something has to bridge that, both for local `ng serve` iteration and for the Docker Compose scenario where the browser talks to `web` (nginx, port 4200) and `api` (port 5080) as genuinely separate containers.
+
+**Decision:** Add an explicit CORS policy in `Program.cs` (`WithOrigins("http://localhost:4200")`, any header/method) rather than an Angular `proxy.conf.json`.
+
+**Alternatives considered:** A dev-server proxy — rejected because it only solves the problem for `ng serve`; the Docker Compose full-stack scenario needs CORS regardless (browser-to-container requests are cross-origin there too), so CORS is the one mechanism that covers both cases instead of needing two.
+
+**Consequences:** The allowed origin is hardcoded to `localhost:4200`. If the frontend is ever served from a different host/port (a real domain, a different dev port), this policy needs updating — worth revisiting once there's an actual deployment target.
+
+---
+
+## [Phase 5] Signals in services for state, not NgRx
+
+**Context:** The Angular app needs to hold and react to server-fetched lists (customers, senders, invoices) across components.
+
+**Decision:** Each API client service (`CustomerService`, `SenderService`, `InvoiceService`) owns a private writable `signal` per piece of state (`_customers`, `_loading`, `_error`, `_totalCount`), exposed read-only via `.asReadonly()`. Components inject the service and read the signals directly in templates — no separate store, no `@ngrx/store`.
+
+**Alternatives considered:** NgRx (or another Redux-style store) — rejected as substantial ceremony (actions, reducers, effects, selectors) for what is, at this app's size, simple per-resource CRUD lists with no complex derived state, undo/redo, or cross-cutting concerns that would justify it. Signals plus `HttpClient` cover this fully and are the idiomatic modern-Angular answer for exactly this shape of problem.
+
+**Consequences:** State is scattered across per-resource services rather than centralized in one store — fine at three resources; if the app's state interactions grow substantially more complex later (e.g. optimistic updates across multiple resources, undo), that's the signal (no pun intended) to reconsider.
+
+---
+
+## [Phase 5] Lazy-loaded standalone routes via `loadComponent`
+
+**Context:** Three top-level routes (`/invoices`, `/customers`, `/senders`), each a standalone component with no NgModule.
+
+**Decision:** `app.routes.ts` uses `loadComponent: () => import(...).then(m => m.X)` for each route rather than eagerly importing all three components into the main bundle.
+
+**Alternatives considered:** Eager imports — simpler syntax, but means every route's code ships in the initial bundle even before the user navigates anywhere. The build output confirms the lazy chunks are real and separate (`invoices-page`, `customers-page`, `senders-page` each ~3KB as standalone chunks, not folded into `main`).
+
+**Consequences:** None significant at this scale — noted mainly as the standalone-component equivalent of NgModule-based lazy loading, worth understanding since it's the default recommended pattern now.
+
+---
+
+## [Phase 5] Docker Desktop's VM disk corruption required a full purge; migrations must be applied manually to a fresh database
+
+**Context:** Verifying Phase 5 against a real backend surfaced two things worth recording. First, Docker Desktop's internal storage became corrupted deeply enough that even its own containerd metadata database (`meta.db`) was unwritable — not fixable by restarting the daemon or removing individual containers, both of which also failed with I/O errors. This was the cumulative result of the disk-space crises from Phase 3/4 finally breaking Docker's VM disk image outright. Second, once Docker Desktop's own "Clean / Purge data" reset gave us a genuinely fresh Postgres volume, the API returned 500s (`relation "customers" does not exist`) until migrations were applied — there is no auto-migrate-on-startup logic in `Program.cs`, so `dotnet ef database update` has to be run by hand against any fresh database.
+
+**Decision:** Did the full Docker Desktop purge (user-confirmed, since it wipes all local Docker state across every project) rather than trying to hand-repair the VM disk. Applied migrations manually via `dotnet ef database update --project src/InvoiceBuilder.Invoices --startup-project src/InvoiceBuilder.Api` against the fresh container.
+
+**Alternatives considered:** Manually locating and deleting Docker Desktop's underlying VM disk file — rejected as riskier and less reversible than the built-in, supported purge path. Adding auto-migration-on-startup to `Program.cs` now — deferred rather than done reactively mid-verification; worth deciding deliberately in Phase 8 (Docker Compose integration) rather than bolting on under pressure, since auto-migrating in production is itself a real architectural choice (danger of concurrent migration races, no chance to review before schema changes apply) and not a default to reach for casually.
+
+**Consequences:** Anyone who resets or freshly clones this project's Docker volumes must remember to run the `dotnet ef database update` command above before the API will serve any data — there is currently no automation for this. Flagged for a real decision (auto-migrate on startup vs. an explicit migration step in a deploy script) when Phase 8 is tackled.
