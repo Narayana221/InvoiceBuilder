@@ -1,6 +1,14 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Xunit;
+
+// xUnit runs separate test classes in parallel by default. Every class here wipes and
+// recreates the whole invoicebuilder_test schema in IAsyncLifetime, sharing one physical
+// database — running two classes at once means one class's EnsureDeleted can drop tables
+// out from under another class's in-flight test. Disabled for the whole assembly rather
+// than per-class, since any new integration test class would hit the same problem.
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
 
 namespace InvoiceBuilder.Invoices.IntegrationTests;
 

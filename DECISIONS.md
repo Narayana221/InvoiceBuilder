@@ -392,3 +392,43 @@ The browser talking to the API is different in kind, not just address. `web`'s n
 **Alternatives considered:** A `.env` file (gitignored) or Docker secrets — the standard next step before any real deployment, where credentials in a committed YAML file would be a genuine problem. Not done now because these are throwaway local-dev-only credentials for a database that only ever runs on `localhost`, and adding secrets infrastructure for that would be unearned complexity at this stage.
 
 **Consequences:** Fine as-is for local development. Revisit alongside the auto-migrate decision above before any real deployment — neither hardcoded credentials nor auto-migrate-on-boot belong in a production configuration.
+
+---
+
+## [Phase 9] Real bug found: editing an invoice's line items threw a 500
+
+**Context:** Writing the first-ever integration test for `PUT /api/invoices/{id}` (there had been zero test coverage on any invoice endpoint besides the Playwright *create* flow from Phase 6 — updates were never exercised by anything, human or automated) immediately failed with `DbUpdateConcurrencyException: expected to affect 1 row(s), but actually affected 0 row(s)`. Reproduced independently against the live dockerized API via curl to rule out a test-infrastructure artifact — same failure, same exception, every time. **Any edit to an existing invoice was broken in production**, silently, since Phase 3.
+
+**Root cause:** The endpoint replaced line items via `invoice.LineItems.Clear()` followed by `invoice.LineItems.Add(new InvoiceLineItem { Id = Guid.NewGuid(), ... })` for each new one — mutating the tracked navigation collection in place. Because the old and new collections happened to have the same count (2 line items in, 2 out), EF Core's automatic collection-fixup logic paired them up by position and treated it as *updating* the old rows' values to match the new ones — generating `UPDATE ... WHERE "Id" = <brand-new-guid>` for rows that don't exist yet, instead of `INSERT`. Zero rows matched, hence the concurrency exception. Confirmed by reading the actual generated SQL from the container logs, not by inspecting the code alone.
+
+**Decision:** Rewrote the update path to go through the `InvoiceLineItems` `DbSet` directly — `db.InvoiceLineItems.RemoveRange(invoice.LineItems)` then `db.InvoiceLineItems.AddRange(newLineItems)` — which sets each entity's tracked state (`Deleted` / `Added`) explicitly rather than leaving EF to infer it from collection-membership diffing. `invoice.LineItems` is then reassigned directly (`invoice.LineItems = newLineItems`) so `RecalculateTotals()`, which reads that property, sees the new set.
+
+**Alternatives considered:** None — once the root cause was clear from the generated SQL, this is simply the standard, correct way to replace a required one-to-many collection in EF Core. The first fix attempt (keeping `Clear()` but adding an explicit `RemoveRange` first) was tried and still failed identically, which is what led to reading the actual SQL rather than continuing to guess.
+
+**Consequences:** This is the single most important reason to write integration tests for every endpoint, not just the ones that feel risky at the time — this bug lived in code that looked completely ordinary. Fixed and verified three ways: the new integration test passes, a direct curl repro against the live container now succeeds, and a Playwright pass through the real UI (edit an invoice's tax rate, save, confirm no error and a clean redirect) confirms the fix end-to-end.
+
+---
+
+## [Phase 9] xUnit runs test classes in parallel by default — disabled for this assembly
+
+**Context:** Adding `SenderEndpointsTests` and `InvoiceEndpointsTests` (alongside the existing `CustomerEndpointsTests`) caused intermittent, non-deterministic failures — sometimes JSON parse errors, sometimes 500s — that didn't reproduce when running any single class in isolation.
+
+**Decision:** Every integration test class wipes and recreates the entire `invoicebuilder_test` schema in `IAsyncLifetime.InitializeAsync`/`DisposeAsync`. xUnit parallelizes *across* test classes by default (though not within one), so with three classes sharing one physical database, one class's `EnsureDeletedAsync` could drop tables out from under another class's in-flight test. Added `[assembly: CollectionBehavior(DisableTestParallelization = true)]` in `CustomWebApplicationFactory.cs` to force all test classes in this assembly to run sequentially.
+
+**Alternatives considered:** Giving each test class its own dedicated database name — more isolation, more true-to-production parallel execution, but adds real complexity (parameterizing `CustomWebApplicationFactory` per class, provisioning N databases) for a test suite that runs in a few seconds regardless of parallelism at this size. Not worth it yet; revisit if the suite grows large enough that sequential execution becomes a real time cost.
+
+**Consequences:** The whole integration suite runs strictly sequentially now, which is slightly slower but deterministic. Any future integration test class added to this project inherits the same DB-wipe pattern safely without needing to remember this constraint.
+
+---
+
+## [Phase 9] Test coverage: what's covered, what's deliberately not
+
+**Backend, added this phase:** Integration tests for `SenderEndpoints` (mirroring the existing `CustomerEndpoints` pattern) and `InvoiceEndpoints` (round-trip CRUD, totals correctness, the due-date cross-field rule, invalid-FK handling, sequential invoice numbering) — the highest-value gap, since it's what surfaced the real update bug above. Unit tests for `CustomerRequestValidator` and `SenderRequestValidator` (fast, no DB) covering required fields, max lengths, and email format edge cases that would be slow and noisy to enumerate via HTTP round-trips.
+
+**Frontend, added this phase:** `CustomerService` and `InvoiceService` — signal-state-on-success/failure, correct URLs/params, the Blob-typed `downloadPdf()` request shape — directly validating the Phase 5 "signals in services" decision. `CustomerFormPage` — representative Reactive Forms validation coverage. `InvoiceFormPage` — the most valuable frontend test: a permanent regression guard for the due-date bug from the Phase 6 bugfix, plus verification that the `toSignal()` + `computed()` live-totals math is actually correct (125/12.50/137.50 for a known input, matching what was screenshotted during Phase 6). `Pager` — one example of testing a simple signal-input/output presentational component.
+
+**Deliberately not duplicated, and why:** `SenderFormPage` (identical pattern to `CustomerFormPage`, same validators mirrored the same way); `SendersPage`/`CustomersPage`/`InvoicesPage` list components (identical list/paginate/delete-confirm pattern, demonstrated once); `ConfirmDialog` (a few lines of template, two outputs — not enough logic to warrant a dedicated spec); `SenderService` (identical shape to `CustomerService`). Retesting an already-demonstrated pattern adds repetition without proportionate new protection — the judgment call throughout this phase was to spend testing effort where the *pattern* was new or where a cross-field rule made a real regression genuinely possible, not to reach 100% file coverage for its own sake.
+
+**Still not covered at all:** `Pager`/`ConfirmDialog` integration *within* a list page (only tested in isolation); the `IInvoiceNumberGenerator`'s year-rollover behavior (sequence resets each January — never exercised, since that would require manipulating the system clock in a test); any true concurrency scenario (two simultaneous edits to the same invoice); the `Users`/`Payments`/`Reports` module stubs (out of scope per the roadmap, which explicitly defers them). Worth being honest about these gaps rather than implying full coverage exists.
+
+**Totals:** Backend went from 8 unit + 2 integration tests to 23 unit + 10 integration tests (1 skipped, unrelated — the IronPDF license/arm64 blocker from Phase 4). Frontend went from 2 tests (the app shell only) to 28 tests across 6 files.

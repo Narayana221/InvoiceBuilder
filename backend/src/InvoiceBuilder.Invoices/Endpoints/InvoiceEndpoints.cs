@@ -124,20 +124,27 @@ public static class InvoiceEndpoints
             invoice.Notes = request.Notes;
             invoice.UpdatedAtUtc = now;
 
-            invoice.LineItems.Clear();
-            foreach (var lineItemRequest in request.LineItems)
+            // Work through the DbSet directly rather than Clear()/Add() on the navigation
+            // collection. EF's collection-fixup pairs up removed/added entries by position
+            // when the counts match, and was emitting UPDATEs for line items that don't
+            // exist yet instead of INSERTs — that mismatch threw a DbUpdateConcurrencyException
+            // at SaveChanges. RemoveRange/AddRange on the DbSet sets each entity's state
+            // explicitly, sidestepping that heuristic entirely.
+            db.InvoiceLineItems.RemoveRange(invoice.LineItems);
+
+            var newLineItems = request.LineItems.Select(lineItemRequest => new InvoiceLineItem
             {
-                invoice.LineItems.Add(new InvoiceLineItem
-                {
-                    Id = Guid.NewGuid(),
-                    InvoiceId = invoice.Id,
-                    Description = lineItemRequest.Description,
-                    Quantity = lineItemRequest.Quantity,
-                    UnitPrice = lineItemRequest.UnitPrice,
-                    CreatedAtUtc = now,
-                    UpdatedAtUtc = now
-                });
-            }
+                Id = Guid.NewGuid(),
+                InvoiceId = invoice.Id,
+                Description = lineItemRequest.Description,
+                Quantity = lineItemRequest.Quantity,
+                UnitPrice = lineItemRequest.UnitPrice,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            }).ToList();
+            db.InvoiceLineItems.AddRange(newLineItems);
+
+            invoice.LineItems = newLineItems;
             invoice.RecalculateTotals();
 
             await db.SaveChangesAsync();
