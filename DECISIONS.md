@@ -354,3 +354,41 @@ Format per entry:
 **Alternatives considered:** Attempting to actually fix IronPDF's license/arm64 blockers as part of this phase — explicitly out of scope; those remain external, documented blockers to resolve separately (add a license key; or add `platform: linux/amd64` to the `api` service, per the Phase 4 entries), not something to route around under the banner of "wiring the download button."
 
 **Consequences:** Clicking "Download PDF" today correctly shows a concise, real error ("Error while deploying IronPdf Chrome renderer: …") rather than either a silent failure or a raw stack trace — verified live via a Playwright script against the actual dockerized container (the failure takes roughly 20–25 seconds to resolve, since IronPDF retries multiple NuGet URLs before giving up; the UI's "Downloading…" state correctly holds through that whole window rather than timing out early). Once either blocker is resolved, this exact code path — no changes needed — will trigger a real PDF save in the browser.
+
+---
+
+## [Phase 8] Auto-migrate the database on API startup
+
+**Context:** Flagged as deferred back in Phase 5: a fresh `docker compose up` (empty Postgres volume) left the API returning 500s until someone manually ran `dotnet ef database update`. This directly contradicts the project's own stated goal — "Docker Compose ... single `docker compose up`."
+
+**Decision:** User-confirmed (asked explicitly, since this was flagged as worth deciding deliberately rather than defaulting silently). Added `InvoicesModule.MigrateInvoicesDatabase()` — resolves `InvoicesDbContext` from a fresh DI scope and calls `Database.Migrate()` — called once from `Program.cs` right after `app.UseCors()` and before the endpoint mappings.
+
+**Alternatives considered:** Keeping migrations a manual/explicit step (a human or deploy script runs `dotnet ef database update` deliberately) — the safer long-term default, since auto-migrating on every boot is genuinely risky once there are multiple concurrent instances racing to apply the same migration, or once schema changes need a review window before they hit a real database. Rejected *for now*, explicitly because this project has no real deployment target yet and its own goal is single-command local convenience. **Revisit before any real production deployment** — at that point, prefer an explicit migration step in a deploy pipeline over auto-migrate-on-boot.
+
+**Consequences:** Verified end-to-end: `docker compose down -v` (destroys the Postgres volume entirely) followed by `docker compose up -d --build` now leaves a fully-working stack with zero manual steps — confirmed by immediately creating a customer via the API and getting a real `201`, and confirming the five expected tables (`customers`, `senders`, `invoices`, `invoice_line_items`, `__EFMigrationsHistory`) exist without ever running `dotnet ef database update` by hand. Also benefits the integration test suite, which points at a separate `invoicebuilder_test` database (see `CustomWebApplicationFactory`) that previously needed the same manual migration step and now gets it automatically whenever `WebApplicationFactory<Program>` boots the app.
+
+---
+
+## [Phase 8] Docker Compose networking: browser-to-container vs container-to-container
+
+**Context:** Worth writing down explicitly, since it's a common point of confusion when first working with Docker Compose. Three services exist: `postgres`, `api`, `web`. They talk to each other two genuinely different ways depending on *who* is making the call.
+
+**Architecture Note:** Docker Compose puts all services on a shared internal network where each is reachable by its *service name* as a hostname — e.g. the `api` container's connection string is `Host=postgres;...`, and that resolves correctly because both containers are on the same Docker network, resolved via Docker's internal DNS. This is **container-to-container** traffic; it never touches the host machine's network stack at all.
+
+The browser talking to the API is different in kind, not just address. `web`'s nginx only serves static files (the built Angular bundle) — it does not proxy API calls. The actual HTTP requests to `/api/...` are made by JavaScript running *in the user's browser*, on the host machine, entirely outside Docker's network. The browser has no idea `api` (the Docker service name) exists or how to resolve it — so `environment.ts`'s `apiBaseUrl: 'http://localhost:5080'` has to use the **host-published port** (`ports: ["5080:8080"]` in `docker-compose.yml`), not the internal service name or port. Hardcoding `http://api:8080` here would work for nothing — not local `ng serve`, not the dockerized `web` container — because in both cases the code executes in the browser, never inside the Docker network.
+
+**Consequences:** This is why the CORS policy (`WithOrigins("http://localhost:4200")`, added in Phase 5) exists at all — from the browser's perspective, `localhost:4200` (the page it's on) and `localhost:5080` (the API it's calling) are different origins, full stop, regardless of the fact that both containers happen to live on the same Docker network under the hood.
+
+---
+
+## [Phase 8] Env var config: `ConnectionStrings__Default` and hardcoded local credentials
+
+**Context:** `docker-compose.yml` sets `ConnectionStrings__Default` (double underscore) as an environment variable on the `api` service, and hardcodes Postgres credentials (`invoicebuilder` / `invoicebuilder`) directly in the compose file for both `postgres` and `api`.
+
+**Architecture Note:** ASP.NET Core's configuration system treats `__` in an environment variable name as the nesting separator, equivalent to `:` in `appsettings.json` — so the env var `ConnectionStrings__Default` binds to the same configuration key as a `"ConnectionStrings": { "Default": "..." }` block in JSON, and env vars take precedence over `appsettings.json` by default in ASP.NET Core's provider ordering. This is how the same codebase runs with a different connection string locally (`appsettings.Development.json`, pointing at `localhost:5433`) versus inside Docker (the env var, pointing at `postgres:5432`) without any code branching.
+
+**Decision:** Left the Postgres credentials hardcoded in `docker-compose.yml` rather than moving them to a `.env` file or secrets store.
+
+**Alternatives considered:** A `.env` file (gitignored) or Docker secrets — the standard next step before any real deployment, where credentials in a committed YAML file would be a genuine problem. Not done now because these are throwaway local-dev-only credentials for a database that only ever runs on `localhost`, and adding secrets infrastructure for that would be unearned complexity at this stage.
+
+**Consequences:** Fine as-is for local development. Revisit alongside the auto-migrate decision above before any real deployment — neither hardcoded credentials nor auto-migrate-on-boot belong in a production configuration.

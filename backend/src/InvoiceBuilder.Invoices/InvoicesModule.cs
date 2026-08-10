@@ -5,6 +5,7 @@ using InvoiceBuilder.Invoices.Endpoints;
 using InvoiceBuilder.Invoices.Pdf;
 using InvoiceBuilder.Invoices.Services;
 using IronPdf;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -35,6 +36,14 @@ public static class InvoicesModule
         }
 
         return services;
+    }
+
+    public static IApplicationBuilder MigrateInvoicesDatabase(this IApplicationBuilder app)
+    {
+        using var scope = app.ApplicationServices.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<InvoicesDbContext>();
+        db.Database.Migrate();
+        return app;
     }
 
     public static IEndpointRouteBuilder MapInvoicesModule(this IEndpointRouteBuilder app)

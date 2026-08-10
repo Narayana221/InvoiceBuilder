@@ -25,6 +25,8 @@ var app = builder.Build();
 
 app.UseCors(frontendCorsPolicy);
 
+app.MigrateInvoicesDatabase();
+
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.MapInvoicesModule();
