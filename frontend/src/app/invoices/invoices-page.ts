@@ -1,9 +1,14 @@
-import { Component, OnInit, inject } from '@angular/core';
+import { Component, OnInit, inject, signal } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { InvoiceService } from '../core/services/invoice.service';
+import { ConfirmDialog } from '../shared/confirm-dialog';
+import { Pager } from '../shared/pager';
+
+const PAGE_SIZE = 20;
 
 @Component({
   selector: 'app-invoices-page',
-  imports: [],
+  imports: [RouterLink, ConfirmDialog, Pager],
   templateUrl: './invoices-page.html',
 })
 export class InvoicesPage implements OnInit {
@@ -13,8 +18,42 @@ export class InvoicesPage implements OnInit {
   readonly loading = this.invoiceService.loading;
   readonly error = this.invoiceService.error;
   readonly totalCount = this.invoiceService.totalCount;
+  readonly pageSize = PAGE_SIZE;
+
+  readonly page = signal(1);
+  readonly pendingDeleteId = signal<string | null>(null);
 
   ngOnInit(): void {
-    this.invoiceService.list();
+    this.load();
+  }
+
+  load(): void {
+    this.invoiceService.list(this.page(), this.pageSize);
+  }
+
+  onPageChange(page: number): void {
+    this.page.set(page);
+    this.load();
+  }
+
+  confirmDelete(id: string): void {
+    this.pendingDeleteId.set(id);
+  }
+
+  cancelDelete(): void {
+    this.pendingDeleteId.set(null);
+  }
+
+  deleteConfirmed(): void {
+    const id = this.pendingDeleteId();
+    if (!id) return;
+
+    this.invoiceService.delete(id).subscribe({
+      next: () => {
+        this.pendingDeleteId.set(null);
+        this.load();
+      },
+      error: () => this.pendingDeleteId.set(null),
+    });
   }
 }

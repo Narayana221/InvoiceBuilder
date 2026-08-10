@@ -1,0 +1,21 @@
+<div class="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+  <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-sm">
+    <p class="text-slate-800">{{ message() }}</p>
+    <div class="mt-5 flex justify-end gap-2">
+      <button
+        type="button"
+        (click)="cancelled.emit()"
+        class="px-3 py-1.5 rounded-md text-sm text-slate-600 hover:bg-slate-100"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        (click)="confirmed.emit()"
+        class="px-3 py-1.5 rounded-md text-sm bg-red-600 text-white hover:bg-red-700"
+      >
+        Delete
+      </button>
+    </div>
+  </div>
+</div>

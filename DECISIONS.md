@@ -279,3 +279,63 @@ Format per entry:
 **Alternatives considered:** Manually locating and deleting Docker Desktop's underlying VM disk file — rejected as riskier and less reversible than the built-in, supported purge path. Adding auto-migration-on-startup to `Program.cs` now — deferred rather than done reactively mid-verification; worth deciding deliberately in Phase 8 (Docker Compose integration) rather than bolting on under pressure, since auto-migrating in production is itself a real architectural choice (danger of concurrent migration races, no chance to review before schema changes apply) and not a default to reach for casually.
 
 **Consequences:** Anyone who resets or freshly clones this project's Docker volumes must remember to run the `dotnet ef database update` command above before the API will serve any data — there is currently no automation for this. Flagged for a real decision (auto-migrate on startup vs. an explicit migration step in a deploy script) when Phase 8 is tackled.
+
+---
+
+## [Phase 6] Reactive Forms over template-driven forms
+
+**Context:** Three CRUD forms are needed (Customer, Sender, Invoice), the last of which has a dynamic, variable-length list of line items with cross-field derived values (subtotal/tax/total).
+
+**Decision:** Built all three with Angular's Reactive Forms (`FormBuilder`, `FormGroup`, `FormArray`) rather than template-driven (`ngModel`-based) forms.
+
+**Alternatives considered:** Template-driven forms — workable for the simple Customer/Sender forms, but they have no equivalent of `FormArray` for a variable-length collection of controls, which the invoice line items require outright. Rather than mixing two form styles across the app (template-driven for two screens, reactive for one), used reactive forms everywhere for consistency. Reactive forms also keep validation logic in the component class instead of scattered across template attributes, which matters most for the invoice form's cross-field rules (due date ≥ invoice date, at least one line item).
+
+**Consequences:** Slightly more boilerplate for the two simple forms (explicit `FormGroup` definitions instead of just `[(ngModel)]` bindings) in exchange for one consistent pattern across all three forms and a straightforward path to the invoice form's `FormArray`.
+
+---
+
+## [Phase 6] Client-side validation mirrors backend FluentValidation rules
+
+**Context:** The backend already enforces validation via FluentValidation (`CustomerRequestValidator`, `InvoiceRequestValidator`, etc.) — required fields, max lengths, `Currency` matching `^[A-Z]{3}$`, `TaxRatePercent` in `[0,100]`, at least one line item.
+
+**Decision:** Angular's built-in `Validators` (`required`, `maxLength`, `pattern`, `min`, `max`) reproduce the same constraints client-side, checked against the actual validator source files before writing the forms rather than guessing at the rules.
+
+**Alternatives considered:** Skipping client-side validation and relying solely on the backend's 400 responses — rejected as poor UX (round-tripping to the server to learn a required field was blank). The backend validators remain the actual authority; the frontend copy is a UX convenience that can drift and would need to be re-synced if the backend rules change — worth remembering if either side is edited later.
+
+**Consequences:** Two places now encode the same rules. Not a data integrity risk (the backend re-validates regardless), but a maintenance one: a future backend validation change (e.g., a new max length) won't automatically propagate to the frontend.
+
+---
+
+## [Phase 6] "View" and "Edit" collapse into one route
+
+**Context:** The original screen spec lists "View, Edit, Delete" as three separate row actions per resource.
+
+**Decision:** Built one form component per resource (`CustomerFormPage`, `SenderFormPage`, `InvoiceFormPage`) that serves both `/new` (empty, create mode) and `/:id/edit` (pre-populated via a `GET`, update mode). There is no separate read-only "View" page.
+
+**Alternatives considered:** A distinct read-only detail page — rejected as pure duplication for entities this simple (a handful of scalar fields, no nested detail worth a richer read view). A pre-filled edit form already shows every field a view page would; the only difference would be disabling the inputs, which adds a mode flag and extra template branching for no real benefit at this project's current complexity. Worth revisiting if a resource later grows enough detail (e.g., an invoice's payment history) that a dedicated read view earns its keep.
+
+**Consequences:** Row actions are just "Edit" and "Delete," not three. If a future requirement specifically needs a non-editable view (e.g., a read-only role), this decision would need revisiting.
+
+---
+
+## [Phase 6] Invoice live totals: `toSignal()` bridges `valueChanges` into a `computed()`
+
+**Context:** The invoice form needs a live subtotal/tax/total panel that updates as line items, quantities, prices, or the tax rate change — a derived value over reactive-forms state, which is fundamentally RxJS (`form.valueChanges` is an `Observable`), not signals.
+
+**Decision:** `toSignal(this.form.valueChanges, { initialValue: this.form.getRawValue() })` bridges the form's value stream into a signal once; `subtotal`, `taxAmount`, and `total` are then plain `computed()` signals derived from it — no manual subscription, no manual change detection.
+
+**Alternatives considered:** Subscribing to `valueChanges` manually and calling a recalculation method imperatively — works, but reintroduces exactly the manual-subscription bookkeeping (unsubscribe on destroy, remembering to call it after every mutation) that signals exist to avoid. `toSignal()` handles the subscription lifecycle automatically and ties cleanly into the rest of the signal-based state already used throughout the app (Phase 5's services).
+
+**Consequences:** None significant — this is the officially recommended interop pattern (`@angular/core/rxjs-interop`) for exactly this situation: a reactive-forms-driven derived value inside a component that otherwise uses signals. Verified live during E2E testing: two line items (2×$50, 1×$25) at a 10% tax rate correctly computed subtotal $125.00, tax $12.50, total $137.50 in the rendered panel before submission.
+
+---
+
+## [Phase 6 bugfix] Missing cross-field date validator caused a silent "Failed to save invoice"
+
+**Context:** User-reported: saving an invoice sometimes just said "Failed to save invoice" with no explanation. Investigation (reproduced with a Playwright script before touching any code) found two things. First, the invoice form mirrored every backend `InvoiceRequestValidator` rule *except* `DueDate >= InvoiceDate` — that one has no client-side equivalent, so a due date picked before the invoice date sails through client validation, hits the backend's 400, and lands in the generic catch-all error handler. Second, that catch-all handler (`error: () => this.error.set('Failed to save invoice.')`, duplicated across all three forms) discarded the actual `ValidationProblemDetails` body the backend sends back, so even backend-only failures were invisible to the user. (A currency-case hypothesis — CSS `uppercase` only being cosmetic, not the real value — was also checked and ruled out: `Validators.pattern(/^[A-Z]{3}$/)` already blocks lowercase input client-side with a clear message, confirmed via the same reproduction approach.)
+
+**Decision:** Added a `FormGroup`-level cross-field validator (`dueDateNotBeforeInvoiceDate`) to the invoice form with its own inline error message. Added a shared `extractErrorMessage()` helper (`shared/http-error.ts`) that reads the real messages out of `HttpErrorResponse.error.errors` when present, and wired it into all three forms' save-error handlers, replacing the generic strings.
+
+**Alternatives considered:** None seriously — this was a straightforward gap-and-fix once reproduced, not a design decision with real trade-offs.
+
+**Consequences:** Any *future* backend validation rule not yet mirrored client-side will now still show its real message instead of a dead end, because `extractErrorMessage()` is a general fallback — this class of bug shouldn't recur silently even if another mirroring gap is missed later. Confirmed fixed by rerunning the exact reproduction script: it now shows "Due date cannot be before the invoice date." before ever reaching the server.

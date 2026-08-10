@@ -1,0 +1,186 @@
+<div class="p-6 max-w-3xl">
+  <h1 class="text-2xl font-semibold text-slate-800 mb-4">{{ isEditMode() ? 'Edit Invoice' : 'New Invoice' }}</h1>
+
+  @if (error()) {
+    <p class="text-red-600 mb-4">{{ error() }}</p>
+  }
+
+  <form [formGroup]="form" (ngSubmit)="save()" class="space-y-6">
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-slate-700">Invoice Date</label>
+        <input
+          type="date"
+          formControlName="invoiceDate"
+          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+        />
+        @if (form.controls.invoiceDate.invalid && form.controls.invoiceDate.touched) {
+          <p class="text-sm text-red-600 mt-1">Invoice date is required.</p>
+        }
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-slate-700">Due Date</label>
+        <input
+          type="date"
+          formControlName="dueDate"
+          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+        />
+        @if (form.controls.dueDate.invalid && form.controls.dueDate.touched) {
+          <p class="text-sm text-red-600 mt-1">Due date is required.</p>
+        } @else if (form.hasError('dueDateBeforeInvoiceDate') && form.controls.dueDate.touched) {
+          <p class="text-sm text-red-600 mt-1">Due date cannot be before the invoice date.</p>
+        }
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-slate-700">Customer</label>
+        <select formControlName="customerId" class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm">
+          <option value="" disabled>Select a customer</option>
+          @for (customer of customers(); track customer.id) {
+            <option [value]="customer.id">{{ customer.name }}</option>
+          }
+        </select>
+        @if (form.controls.customerId.invalid && form.controls.customerId.touched) {
+          <p class="text-sm text-red-600 mt-1">Customer is required.</p>
+        }
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-slate-700">Sender</label>
+        <select formControlName="senderId" class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm">
+          <option value="" disabled>Select a sender</option>
+          @for (sender of senders(); track sender.id) {
+            <option [value]="sender.id">{{ sender.name }}</option>
+          }
+        </select>
+        @if (form.controls.senderId.invalid && form.controls.senderId.touched) {
+          <p class="text-sm text-red-600 mt-1">Sender is required.</p>
+        }
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-slate-700">Currency</label>
+        <input
+          type="text"
+          formControlName="currency"
+          maxlength="3"
+          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm uppercase"
+        />
+        @if (form.controls.currency.invalid && form.controls.currency.touched) {
+          <p class="text-sm text-red-600 mt-1">3-letter ISO code, e.g. USD.</p>
+        }
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-slate-700">Tax Rate (%)</label>
+        <input
+          type="number"
+          formControlName="taxRatePercent"
+          min="0"
+          max="100"
+          step="0.01"
+          class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+        />
+        @if (form.controls.taxRatePercent.invalid && form.controls.taxRatePercent.touched) {
+          <p class="text-sm text-red-600 mt-1">Must be between 0 and 100.</p>
+        }
+      </div>
+    </div>
+
+    <div>
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-medium text-slate-700">Line Items</h2>
+        <button type="button" (click)="addLineItem()" class="text-sm text-slate-600 hover:underline">
+          + Add line item
+        </button>
+      </div>
+
+      <div formArrayName="lineItems" class="space-y-2">
+        @for (item of lineItems.controls; track item; let i = $index) {
+          <div [formGroupName]="i" class="grid grid-cols-12 gap-2 items-start">
+            <div class="col-span-6">
+              <input
+                type="text"
+                formControlName="description"
+                placeholder="Description"
+                class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              />
+              @if (item.controls.description.invalid && item.controls.description.touched) {
+                <p class="text-xs text-red-600 mt-1">Required.</p>
+              }
+            </div>
+            <div class="col-span-2">
+              <input
+                type="number"
+                formControlName="quantity"
+                placeholder="Qty"
+                min="0.01"
+                step="0.01"
+                class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div class="col-span-3">
+              <input
+                type="number"
+                formControlName="unitPrice"
+                placeholder="Unit Price"
+                min="0"
+                step="0.01"
+                class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div class="col-span-1 pt-2">
+              <button
+                type="button"
+                (click)="removeLineItem(i)"
+                [disabled]="lineItems.length <= 1"
+                class="text-red-600 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                &times;
+              </button>
+            </div>
+          </div>
+        }
+      </div>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-700">Notes</label>
+      <textarea
+        formControlName="notes"
+        rows="3"
+        class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+      ></textarea>
+    </div>
+
+    <div class="bg-slate-50 border border-slate-200 rounded-md p-4 max-w-sm ml-auto text-sm">
+      <div class="flex justify-between py-1">
+        <span class="text-slate-500">Subtotal</span>
+        <span>{{ subtotal() | number: '1.2-2' }}</span>
+      </div>
+      <div class="flex justify-between py-1">
+        <span class="text-slate-500">Tax</span>
+        <span>{{ taxAmount() | number: '1.2-2' }}</span>
+      </div>
+      <div class="flex justify-between py-1 font-semibold border-t border-slate-200 mt-1 pt-2">
+        <span>Total</span>
+        <span>{{ total() | number: '1.2-2' }}</span>
+      </div>
+    </div>
+
+    <div class="flex gap-2 pt-2">
+      <button
+        type="submit"
+        [disabled]="saving()"
+        class="px-4 py-2 rounded-md bg-slate-900 text-white text-sm disabled:opacity-50"
+      >
+        {{ saving() ? 'Saving…' : 'Save' }}
+      </button>
+      <button type="button" (click)="cancel()" class="px-4 py-2 rounded-md text-sm text-slate-600 hover:bg-slate-100">
+        Cancel
+      </button>
+    </div>
+  </form>
+</div>
