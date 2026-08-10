@@ -9,6 +9,10 @@
     </a>
   </div>
 
+  @if (downloadError()) {
+    <p class="text-red-600 mb-4">{{ downloadError() }}</p>
+  }
+
   @if (loading()) {
     <p class="text-slate-500">Loading…</p>
   } @else if (error()) {
@@ -36,7 +40,15 @@
             <td class="py-2 pr-4">{{ invoice.dueDate }}</td>
             <td class="py-2 pr-4 text-right">{{ invoice.totalAmount }} {{ invoice.currency }}</td>
             <td class="py-2 pr-4 text-right whitespace-nowrap">
-              <a [routerLink]="['/invoices', invoice.id, 'edit']" class="text-slate-600 hover:underline">Edit</a>
+              <button
+                type="button"
+                (click)="downloadPdf(invoice)"
+                [disabled]="downloadingId() === invoice.id"
+                class="text-slate-600 hover:underline disabled:opacity-50 disabled:cursor-wait"
+              >
+                {{ downloadingId() === invoice.id ? 'Downloading…' : 'Download PDF' }}
+              </button>
+              <a [routerLink]="['/invoices', invoice.id, 'edit']" class="ml-3 text-slate-600 hover:underline">Edit</a>
               <button
                 type="button"
                 (click)="confirmDelete(invoice.id)"

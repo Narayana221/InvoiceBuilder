@@ -339,3 +339,18 @@ Format per entry:
 **Alternatives considered:** None seriously — this was a straightforward gap-and-fix once reproduced, not a design decision with real trade-offs.
 
 **Consequences:** Any *future* backend validation rule not yet mirrored client-side will now still show its real message instead of a dead end, because `extractErrorMessage()` is a general fallback — this class of bug shouldn't recur silently even if another mirroring gap is missed later. Confirmed fixed by rerunning the exact reproduction script: it now shows "Due date cannot be before the invoice date." before ever reaching the server.
+
+---
+
+## [Phase 7] PDF download flow: wired end-to-end, generation itself still blocked (as expected)
+
+**Context:** Phase 7's scope, as originally split from Phase 4, was specifically "wire frontend Download PDF to backend" — the actual PDF rendering has been blocked since Phase 4 by two external issues (IronPDF needs a trial/license key; its Linux Chrome engine has no arm64 build), both already documented and deliberately deferred rather than worked around.
+
+**Decision:** Built the full client-side flow regardless of the backend blocker: a "Download PDF" row action calling `InvoiceService.downloadPdf()` (already existed from Phase 5), a `downloadBlob()` helper that triggers a real browser file save from the response Blob, and per-row loading/error state. Along the way, fixed two things this surfaced:
+1. The `/pdf` endpoint had no try/catch — an IronPDF failure was an *unhandled* exception, which in this environment meant the raw `DeveloperExceptionPageMiddleware` output (a multi-KB stack trace) was the literal HTTP response body. Wrapped it in `Results.Problem(...)` so any client gets clean, structured JSON instead.
+2. Because the frontend request uses `responseType: 'blob'` (required to receive PDF bytes), Angular's `HttpErrorResponse.error` on failure is *also* a Blob, not parsed JSON — the existing `extractErrorMessage()` helper from the Phase 6 bugfix doesn't work on it. Added `extractBlobErrorMessage()`, an async variant that reads the Blob as text and parses it.
+3. IronPDF's raw exception `.Message` for this specific failure is a genuinely enormous nested string (visibly confirmed via screenshot: several paragraphs of "Failed to locate X at Y" repeated many times). Truncated it server-side to 200 characters — accurate enough to identify the problem, without dumping an unreadable wall of red text onto the page.
+
+**Alternatives considered:** Attempting to actually fix IronPDF's license/arm64 blockers as part of this phase — explicitly out of scope; those remain external, documented blockers to resolve separately (add a license key; or add `platform: linux/amd64` to the `api` service, per the Phase 4 entries), not something to route around under the banner of "wiring the download button."
+
+**Consequences:** Clicking "Download PDF" today correctly shows a concise, real error ("Error while deploying IronPdf Chrome renderer: …") rather than either a silent failure or a raw stack trace — verified live via a Playwright script against the actual dockerized container (the failure takes roughly 20–25 seconds to resolve, since IronPDF retries multiple NuGet URLs before giving up; the UI's "Downloading…" state correctly holds through that whole window rather than timing out early). Once either blocker is resolved, this exact code path — no changes needed — will trigger a real PDF save in the browser.

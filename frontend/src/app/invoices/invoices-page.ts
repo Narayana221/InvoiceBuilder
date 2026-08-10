@@ -3,6 +3,9 @@ import { RouterLink } from '@angular/router';
 import { InvoiceService } from '../core/services/invoice.service';
 import { ConfirmDialog } from '../shared/confirm-dialog';
 import { Pager } from '../shared/pager';
+import { downloadBlob } from '../shared/download-blob';
+import { extractBlobErrorMessage } from '../shared/http-error';
+import type { InvoiceSummary } from '../core/models/invoice.model';
 
 const PAGE_SIZE = 20;
 
@@ -22,6 +25,8 @@ export class InvoicesPage implements OnInit {
 
   readonly page = signal(1);
   readonly pendingDeleteId = signal<string | null>(null);
+  readonly downloadingId = signal<string | null>(null);
+  readonly downloadError = signal<string | null>(null);
 
   ngOnInit(): void {
     this.load();
@@ -54,6 +59,22 @@ export class InvoicesPage implements OnInit {
         this.load();
       },
       error: () => this.pendingDeleteId.set(null),
+    });
+  }
+
+  downloadPdf(invoice: InvoiceSummary): void {
+    this.downloadingId.set(invoice.id);
+    this.downloadError.set(null);
+
+    this.invoiceService.downloadPdf(invoice.id).subscribe({
+      next: (blob) => {
+        downloadBlob(blob, `${invoice.invoiceNumber}.pdf`);
+        this.downloadingId.set(null);
+      },
+      error: async (err) => {
+        this.downloadError.set(await extractBlobErrorMessage(err, 'Failed to download PDF.'));
+        this.downloadingId.set(null);
+      },
     });
   }
 }

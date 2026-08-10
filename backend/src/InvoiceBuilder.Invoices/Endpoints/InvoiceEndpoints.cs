@@ -173,8 +173,23 @@ public static class InvoiceEndpoints
                 return Results.NotFound();
             }
 
-            var pdfBytes = pdfRenderer.Render(invoice);
-            return Results.File(pdfBytes, "application/pdf", $"{invoice.InvoiceNumber}.pdf");
+            try
+            {
+                var pdfBytes = pdfRenderer.Render(invoice);
+                return Results.File(pdfBytes, "application/pdf", $"{invoice.InvoiceNumber}.pdf");
+            }
+            catch (Exception ex)
+            {
+                const int maxDetailLength = 200;
+                var detail = ex.Message.Length > maxDetailLength
+                    ? ex.Message[..maxDetailLength] + "…"
+                    : ex.Message;
+
+                return Results.Problem(
+                    title: "PDF generation failed",
+                    detail: detail,
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
         });
 
         return app;

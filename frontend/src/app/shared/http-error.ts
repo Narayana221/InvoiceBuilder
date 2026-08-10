@@ -7,3 +7,16 @@ export function extractErrorMessage(err: unknown, fallback: string): string {
   }
   return fallback;
 }
+
+/** For requests made with `responseType: 'blob'`, the error body also arrives as a Blob, not parsed JSON. */
+export async function extractBlobErrorMessage(err: unknown, fallback: string): Promise<string> {
+  if (err instanceof HttpErrorResponse && err.error instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await err.error.text());
+      return parsed.detail || parsed.title || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
